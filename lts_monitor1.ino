@@ -6,7 +6,7 @@
  * 
  *
  * @author Jürgen Buchinger
- * @version 1.0 27 Aug 2024
+ * @version 1.2 27 Aug 2024
  * 
  */
 
@@ -52,12 +52,19 @@ bool verbose = false;
 String datepos = "datetime,fix,fixquality,lat,lon";
 String iaq = "IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage";
 String dust = "PM25,PM10";
+String brightness = "brightness";
+String header = "num,"+datepos+","+iaq+","+dust+","+brightness;
 
 /** for keeping track of time */
 unsigned long timepassed;
 int cycletime = 10000; // 10 s
 int dustCycle = 60000;
-unsigned int lastDustOn, lastDustOff;
+unsigned long lastDustOn, lastDustOff;
+unsigned long count = 0;    // counts the lines of data
+
+/** for average calculation */
+float accBrightness = 0;
+int numBrightness = 0;
 
 void setup() {
   if(verbose) {
@@ -143,25 +150,8 @@ void setup() {
     Serial.println("starting");
   }
 
-  // write header
-  File dataFile = SD.open("datalog.txt", FILE_WRITE);
-
-  // if the file is available, write to it:
-  if (dataFile) {
-    dataFile.print(datepos);
-    dataFile.print(",");
-    dataFile.print(iaq);
-    dataFile.print(",");
-    dataFile.println(dust);
-    dataFile.close();
-  }
-
   if(verbose) {
-    Serial.print(datepos);
-    Serial.print(",");
-    Serial.print(iaq);
-    Serial.print(",");
-    Serial.println(dust);
+    Serial.println(header);
   }
   timepassed = millis();
   lastDustOff = millis();
@@ -170,6 +160,12 @@ void setup() {
 }
 
 void loop() {
+  /**
+   * Light sensor reading below
+   */
+  accBrightness += analogRead(A1);
+  numBrightness++;
+
   /**
    * GPS reading out below
    */
@@ -219,27 +215,57 @@ void loop() {
   
   if(millis() - timepassed > cycletime) {
     timepassed+=cycletime;
+    // we are setting this high during writing to ensure noone removes disk while writing to it
     digitalWrite(LED_BUILTIN, HIGH);
-    File dataFile = SD.open("datalog.txt", FILE_WRITE);
+
+    // calc average of brightness
+    brightness = String(accBrightness/numBrightness);
+    accBrightness=0;
+    numBrightness=0;
+
+    char filename[14];
+    sprintf(filename, "20%02d%02d%02d.txt", GPS.year, GPS.month, GPS.day);
+    String num;
+
+    if(SD.exists(filename)) {   // if we make a new file, include headers
+      num = String(count);
+    } else {
+      num = header+"\n"+String(count);
+    }
+
+    File dataFile = SD.open(filename, FILE_WRITE);
 
     // if the file is available, write to it:
     if (dataFile) {
+      dataFile.print(num);
+      dataFile.print(",");
       dataFile.print(datepos);
       dataFile.print(",");
       dataFile.print(iaq);
       dataFile.print(",");
-      dataFile.println(dust);
+      dataFile.print(dust);
+      dataFile.print(",");
+      dataFile.println(brightness);
       dataFile.close();
+      count++;
       digitalWrite(LED_BUILTIN, LOW);
     } else {
-      onError(3, "Error opening datalog.txt");
+      onError(3, "Error opening file: '"+String(filename)+"'");
+      File data2 = SD.open("testfile.txt", FILE_WRITE);
+      if(data2) {
+        Serial.println("Testfile worked!");
+      }
     }
     if(verbose) {
+      Serial.print(num);
+      Serial.print(",");
       Serial.print(datepos);
       Serial.print(",");
       Serial.print(iaq);
       Serial.print(",");
-      Serial.println(dust);
+      Serial.print(dust);
+      Serial.print(",");
+      Serial.println(brightness);
     }
   }
 }
