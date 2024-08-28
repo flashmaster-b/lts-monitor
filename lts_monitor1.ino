@@ -6,7 +6,7 @@
  * 
  *
  * @author Jürgen Buchinger
- * @version 1.2 27 Aug 2024
+ * @version 2.4 28 Aug 2024
  * 
  */
 
@@ -17,16 +17,18 @@
 #include "SdsDustSensor.h"
 #include <SPI.h>
 #include <SD.h>
+#include <LoRa.h>
 
 /**
  * for SD card
  */
 const int chipSelect = SS;
+int SDOn = 0;
 
 
- /* We need two UART connections, so we have to make use of the MKR's SERCOM 
-  * thingy to define a additional serial connection Serial3 on pin 2 & 3 
-  */
+/* We need two UART connections, so we have to make use of the MKR's SERCOM 
+* thingy to define a additional serial connection Serial3 on pin 2 & 3 
+*/
 Uart Serial3 (&sercom0, 3, 2, SERCOM_RX_PAD_3, UART_TX_PAD_2);
 void SERCOM0_Handler() {
   Serial3.IrqHandler();
@@ -50,6 +52,7 @@ bool verbose = false;
  * but read them out asynchronous
  */
 String datepos = "datetime,fix,fixquality,lat,lon";
+String datepos_LoRa ="datetime,fix,fixquality";
 String iaq = "IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage";
 String dust = "PM25,PM10";
 String brightness = "brightness";
@@ -66,11 +69,12 @@ unsigned long count = 0;    // counts the lines of data
 float accBrightness = 0;
 int numBrightness = 0;
 
+
 void setup() {
   if(verbose) {
     Serial.begin(115200);
     delay(3000);
-    Serial.println("TIME OUT OF PRESENT");
+    Serial.println("TIME OUT OF PRESENT v2.4");
     Serial.println("Long term environmental monitoring");
   } else {
     digitalWrite(LED_BUILTIN, HIGH);
@@ -87,11 +91,20 @@ void setup() {
   /**
    * initialize SD card
    */
-  if(verbose) Serial.print("Initializing SD card...");
-  if(!SD.begin(chipSelect)) {
-    onError(3, "SD initialization failed.");
+  initSD();
+
+
+  /**
+   * initialise LoRa communication
+   * we will broadcast data over LoRa 
+   * for monitoring purposes
+   */
+  if(verbose) Serial.println("Initialising LoRa...");
+  if (!LoRa.begin(868E6)) {
+    onError(3, "Starting LoRa failed!");
+  } else {
+    Serial.println("done.");
   }
-  if(verbose) Serial.println("initialization done.");
 
   /**
    * Set up GPS 
@@ -167,7 +180,7 @@ void loop() {
   numBrightness++;
 
   /**
-   * GPS reading out below
+   * GPS reading below
    */
   char c = GPS.read();
   // if a sentence is received, we can check the checksum and parse it
@@ -213,51 +226,20 @@ void loop() {
     }
   }
   
+  /**
+   * each cycle time we save data to SD card (and print if verbose)
+   */
   if(millis() - timepassed > cycletime) {
-    timepassed+=cycletime;
-    // we are setting this high during writing to ensure noone removes disk while writing to it
-    digitalWrite(LED_BUILTIN, HIGH);
-
     // calc average of brightness
     brightness = String(accBrightness/numBrightness);
     accBrightness=0;
     numBrightness=0;
 
-    char filename[14];
-    sprintf(filename, "20%02d%02d%02d.txt", GPS.year, GPS.month, GPS.day);
-    String num;
-
-    if(SD.exists(filename)) {   // if we make a new file, include headers
-      num = String(count);
-    } else {
-      num = header+"\n"+String(count);
-    }
-
-    File dataFile = SD.open(filename, FILE_WRITE);
-
-    // if the file is available, write to it:
-    if (dataFile) {
-      dataFile.print(num);
-      dataFile.print(",");
-      dataFile.print(datepos);
-      dataFile.print(",");
-      dataFile.print(iaq);
-      dataFile.print(",");
-      dataFile.print(dust);
-      dataFile.print(",");
-      dataFile.println(brightness);
-      dataFile.close();
-      count++;
-      digitalWrite(LED_BUILTIN, LOW);
-    } else {
-      onError(3, "Error opening file: '"+String(filename)+"'");
-      File data2 = SD.open("testfile.txt", FILE_WRITE);
-      if(data2) {
-        Serial.println("Testfile worked!");
-      }
-    }
+    timepassed+=cycletime;
+    writeDataToSD();
+    sendData();
     if(verbose) {
-      Serial.print(num);
+      Serial.print(count);
       Serial.print(",");
       Serial.print(datepos);
       Serial.print(",");
@@ -265,7 +247,9 @@ void loop() {
       Serial.print(",");
       Serial.print(dust);
       Serial.print(",");
-      Serial.println(brightness);
+      Serial.print(brightness);
+      Serial.print(",");
+      Serial.println(SDOn);
     }
   }
 }
@@ -276,6 +260,9 @@ void loop() {
 String parseDataFromGPS() {
   char datetime[42];
   sprintf(datetime, "20%02d-%02d-%02dT%02d:%02d:%02d,%d,%d,%f,%f", GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, GPS.fix, GPS.fixquality, GPS.latitude/100., GPS.longitude/100.);
+  char datetime_LoRa[26];
+  sprintf(datetime_LoRa, "20%02d-%02d-%02dT%02d:%02d:%02d,%d,%d", GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, GPS.fix, GPS.fixquality);
+  datepos_LoRa = datetime_LoRa;
   return datetime;
 }
 
@@ -285,15 +272,15 @@ String parseDataFromGPS() {
 String parseIAQ() {
   String output = "";
   output += String(iaqSensor.iaq);
-  output += ", " + String(iaqSensor.iaqAccuracy);
-  output += ", " + String(iaqSensor.staticIaq);
-  output += ", " + String(iaqSensor.co2Equivalent);
-  output += ", " + String(iaqSensor.breathVocEquivalent);
-  output += ", " + String(iaqSensor.pressure);
-  output += ", " + String(iaqSensor.gasResistance);
-  output += ", " + String(iaqSensor.temperature);
-  output += ", " + String(iaqSensor.humidity);
-  output += ", " + String(iaqSensor.gasPercentage);
+  output += "," + String(iaqSensor.iaqAccuracy);
+  output += "," + String(iaqSensor.staticIaq);
+  output += "," + String(iaqSensor.co2Equivalent);
+  output += "," + String(iaqSensor.breathVocEquivalent);
+  output += "," + String(iaqSensor.pressure);
+  output += "," + String(iaqSensor.gasResistance);
+  output += "," + String(iaqSensor.temperature);
+  output += "," + String(iaqSensor.humidity);
+  output += "," + String(iaqSensor.gasPercentage);
   return output;
 }
 
@@ -345,4 +332,86 @@ void onError(int level, String err) {
     }
     Serial.println(err);
   }
+}
+
+
+/**
+ * writes a dataset to SD card
+ */
+void writeDataToSD() {
+  // we are setting this high during writing to ensure noone removes disk while writing to it
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  char filename[14];
+  sprintf(filename, "20%02d%02d%02d.txt", GPS.year, GPS.month, GPS.day);
+  String num;
+
+  if(SD.exists(filename)) {   // if we make a new file, include headers
+    num = String(count);
+  } else {
+    num = header+"\n"+String(count);
+  }
+
+  File dataFile = SD.open(filename, FILE_WRITE);
+
+  // if the file is available, write to it:
+  if (dataFile) {
+    dataFile.print(num);
+    dataFile.print(",");
+    dataFile.print(datepos);
+    dataFile.print(",");
+    dataFile.print(iaq);
+    dataFile.print(",");
+    dataFile.print(dust);
+    dataFile.print(",");
+    dataFile.println(brightness);
+    dataFile.close();
+    count++;
+    SDOn = 1;
+    digitalWrite(LED_BUILTIN, LOW);
+  } else {  // if not, produce error
+    onError(3, "Error opening file: '"+String(filename)+"'");
+    onError(2, "Trying to re-initialize...");
+    SDOn = 0;
+    // we try to re-initalize the card (this is useful if you change cards during operation)
+    // and if it succeeds, we try to write again
+    if(initSD()) {
+      writeDataToSD();
+    } else {
+      onError(3, "Re-initialization of SD failed!");
+    }
+  }
+}
+
+/**
+ * initialize SD Card reader
+ */
+bool initSD() {
+  if(verbose) Serial.print("Initializing SD card...");
+  if(!SD.begin(chipSelect)) {
+    onError(3, "SD initialization failed.");
+    return false;
+  }
+  if(verbose) Serial.println("initialization done.");
+  return true;
+}
+
+/**
+ * send data over LoRa
+ */
+void sendData() {
+  // send packet
+  LoRa.beginPacket();
+  LoRa.print(count);
+  LoRa.print(",");
+  LoRa.print(datepos_LoRa);
+  LoRa.print(",");
+  LoRa.print(iaq);
+  LoRa.print(",");
+  LoRa.print(dust);
+  LoRa.print(",");
+  LoRa.print(brightness);
+  LoRa.print(",");
+  LoRa.print(SDOn);
+  LoRa.endPacket();
 }
