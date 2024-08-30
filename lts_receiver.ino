@@ -9,21 +9,23 @@
  * count,datetime,fix,fixquality,IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage,PM25,PM10,brightness,SDOn
  *
  * @author Jürgen Buchinger
- * @version 1.2 28 Aug 2024
+ * @version 1.3 29 Aug 2024
  * 
  */
 
 #include <SPI.h>
-#include <LoRa.h>
+#include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_SH110X.h>
+#include <LoRa.h>
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C
+#define OLED_MOSI     10
+#define OLED_CLK      8
+#define OLED_DC       7
+#define OLED_CS       6
+#define OLED_RST      9
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SH1106G display = Adafruit_SH1106G(128, 64,OLED_MOSI, OLED_CLK, OLED_DC, OLED_RST, OLED_CS);
 
 int page = 1;
 
@@ -36,12 +38,12 @@ void setup() {
   Serial.println("LoRa Receiver");
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  if(!display.begin(0, true)) {
     Serial.println(F("SSD1306 allocation failed"));
   }
   display.setTextSize(2);
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SH110X_WHITE);
   display.println("LTS\nRECEIVER\nv1.2");
   display.display();
 
@@ -75,7 +77,6 @@ void loop() {
 
     // received a packet
     display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
     display.setCursor(109,0);
     display.setTextSize(1);
     display.print(page);
