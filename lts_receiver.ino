@@ -2,14 +2,14 @@
  * Long Term Environmental Monitoring for 
  * artistic projekt "Time out of Present"
  *
- * receives and displays data from lts-monitor1
+ * receives and displays data from lts-monitor2
  * message is as follows
  *
  * 0     1        2   3          4   5           6         7             8              9        10     11   12       13            14   15   16         17
  * count,datetime,fix,fixquality,IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage,PM25,PM10,brightness,SDOn
  *
  * @author Jürgen Buchinger
- * @version 1.3 29 Aug 2024
+ * @version 1.4 19 Sep 2024
  * 
  */
 
@@ -84,7 +84,9 @@ void loop() {
     display.setCursor(0, 0);
     display.print(msg[0] + " (");
     if(msg[17] == "1") {
-      display.print("SD on");
+      display.print("SD 1");
+    } else if(msg[17] == "2") {
+      display.print("SD 2");
     } else {
       display.print("SD off");
     }
