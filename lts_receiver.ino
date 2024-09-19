@@ -27,14 +27,12 @@
 
 Adafruit_SH1106G display = Adafruit_SH1106G(128, 64,OLED_MOSI, OLED_CLK, OLED_DC, OLED_RST, OLED_CS);
 
+/** there are three pages of values to display, we swap at each received message */
 int page = 1;
+
 
 void setup() {
   Serial.begin(9600);
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(3000);
-  digitalWrite(LED_BUILTIN, LOW);
-
   Serial.println("LoRa Receiver");
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -44,7 +42,7 @@ void setup() {
   display.setTextSize(2);
   display.clearDisplay();
   display.setTextColor(SH110X_WHITE);
-  display.println("LTS\nRECEIVER\nv1.2");
+  display.println("LTS\nRECEIVER\nv1.4");
   display.display();
 
   if (!LoRa.begin(868E6)) {
@@ -53,29 +51,30 @@ void setup() {
   }
 }
 
-void loop() {
 
-  // try to parse packet
+void loop() {
+  // we will parse the packet here
   int packetSize = LoRa.parsePacket();
-  if(packetSize) {
+  if(packetSize) {    // if a packet was received
+    // we know we will receive 19 data points
     String msg[19];
     for(int i=0; i<19; i++) {
-      msg[i] = "";
+      msg[i] = "";        // initialise the strings
     }
     int i=0;
     // read packet
     while (LoRa.available()) {
       char a = (char)LoRa.read();
-      if(a == ',') {
+      if(a == ',') {      // datapoints are comma separated so after comme we increment to next datapoint
         i++;
-      } else if(a == 'T') {
+      } else if(a == 'T') {   // make the date more readable
         msg[i] += ' ';
       } else {
-        msg[i] += a;
+        msg[i] += a;      // if nothing else we add the character to the string
       }
     }
 
-    // received a packet
+    // display the data
     display.clearDisplay();
     display.setCursor(109,0);
     display.setTextSize(1);
