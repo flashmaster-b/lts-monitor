@@ -6,7 +6,7 @@
  * 
  *
  * @author Jürgen Buchinger
- * @version 3.1 19 Sep 2024
+ * @version 4.1 19 Sep 2024
  * 
  */
 
@@ -18,6 +18,8 @@
 #include <SPI.h>
 #include <SD.h>
 #include <LoRa.h>
+#include <TimeLib.h>
+
 
 /**
  * we use two card slots so we can swap on the fly
@@ -25,7 +27,7 @@
 const int chipSelect1 = 6;
 const int chipSelect2 = 7;
 int currentCard = chipSelect1;
-int SDOn = 0;
+byte SDOn = 0;
 
 
 /** 
@@ -37,8 +39,13 @@ int SDOn = 0;
 
 /** 
  * the light sensor analog in
+ * the pins for the raincounter and 
+ * windspeed, will be used as interrupts
  */
-#define LIGHT_SENSOR_PIN A6
+#define LIGHT_SENSOR_PIN  A6
+#define WINDSPEED_PIN     0
+#define RAINWATER_PIN     1
+#define WINDDIRECTION_PIN A5
 
 
 /**
@@ -78,7 +85,12 @@ String datepos_LoRa ="datetime,fix,fixquality";
 String iaq = "IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage";
 String dust = "PM25,PM10";
 String brightness = "brightness";
-const String header = "num,"+datepos+","+iaq+","+dust+","+brightness;   // header will be inserted on top of each file and will not change
+String windspeed = "windspeed";
+String winddirection ="wind direction";
+String rainfall = "rainfall";
+const String header = "num,"+datepos+","+iaq+","+dust+","+brightness+","+windspeed+","+winddirection+","+rainfall;   // header will be inserted on top of each file and will not change
+time_t udate;
+float lat=0, lon=0, iaq_=0, eco2=0, bvoc=0, pressure=0, temp=0, humidity=0, pm25=0, pm10=0, bright=0, wSpeed=0, wDirection=0, wRain=0;
 
 
 /** for keeping track of time, all in ms */
@@ -87,11 +99,17 @@ int cycletime = 10000;
 int dustCycle = 60000;
 unsigned long lastDustOn, lastDustOff;
 unsigned long count = 0;    // counts the lines of data
+int page = 0;     // we have to split LoRa data in pages, otherwise its too long
 
 
-/** for average calculation */
+/** for average calculation and other calculations */
 float accBrightness = 0;
 int numBrightness = 0;
+volatile int windCount=0, rainCount=0;
+
+// this is for the calculation of the wind vane direction from the value of the voltage divider,
+// we get these values from the datasheet
+const int vaneValues[16] = { 786, 406, 461, 84, 93, 66, 185, 127, 287, 245, 630, 599, 945, 828, 887, 703 };
 
 
 void setup() {
@@ -106,6 +124,12 @@ void setup() {
   pinMode(LED_C1, OUTPUT);
   pinMode(LED_C2, OUTPUT);
   
+  // attach the wind and rainwater pins to interruts on falling flank
+  pinMode(WINDSPEED_PIN, INPUT_PULLUP);
+  pinMode(RAINWATER_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(WINDSPEED_PIN), wind, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RAINWATER_PIN), rain, FALLING);
+
   analogWrite(LED_C1, 2);
   analogWrite(LED_C2, 0);
   delay(300);
@@ -224,8 +248,8 @@ void loop() {
    */
   char c = GPS.read();
   // if a sentence is received, we can check the checksum and parse it
-  if (GPS.newNMEAreceived()) {
-    if (GPS.parse(GPS.lastNMEA())) {    // this also sets the newNMEAreceived() flag to false
+  if(GPS.newNMEAreceived()) {
+    if(GPS.parse(GPS.lastNMEA())) {    // this also sets the newNMEAreceived() flag to false
       datepos = parseDataFromGPS();
     } else {
       onError(2, "Could not parse NMEA messsage");
@@ -276,10 +300,35 @@ void loop() {
 
     digitalWrite(LED_BUILTIN, LOW);
 
-    // calc average of brightness
-    brightness = String(accBrightness/numBrightness);
+    // calculate average of brightness
+    bright = accBrightness/numBrightness;
     accBrightness=0;
     numBrightness=0;
+ 
+    // read the value from the vind vane voltage divider and
+    // calculate the direction in degrees
+    int dir = analogRead(WINDDIRECTION_PIN);
+    int smallestDifference = abs(dir - vaneValues[0]);
+    wDirection = 0;
+    for (int i = 1; i < 16; i++) {
+        int difference = abs(dir - vaneValues[i]);
+        if (difference < smallestDifference) {
+            smallestDifference = difference;
+            wDirection = i * 22.5;
+        }
+    }
+
+    // calculate windspeed. As per datasheet, a wind speed of 2.4km/h causes 
+    // the switch to close once per second, so v [km/h] = count / sec * 2.4
+    // somehow the contact closes twice for each rotation so we divide by two
+    wSpeed = (windCount / (cycletime/1000.0)) * 2.4 / 2;
+    windCount = 0;
+
+    // calculate rainfall amount, according to datasheet, 1 contact equals
+    // 0.2794 mm of rainfall
+    // also here the contact closes twice, so / 2 it is
+    wRain = rainCount * 0.2794 / 2;
+    rainCount = 0;
 
     writeDataToSD();
     sendData();
@@ -292,7 +341,15 @@ void loop() {
       Serial.print(",");
       Serial.print(dust);
       Serial.print(",");
-      Serial.println(brightness);
+      Serial.print(bright);
+      Serial.print(",");
+      Serial.print(String(wSpeed));
+      Serial.print(",");
+      Serial.print(String(wDirection));
+      Serial.print(",");
+      Serial.print(String(wRain));
+      Serial.print(",");
+      Serial.println(SDOn);
     }
   }
 }
@@ -301,11 +358,18 @@ void loop() {
  * parses the data from GPS sensor and returns it
  */
 String parseDataFromGPS() {
+  tmElements_t tm;
+  tm.Year = 2000 + GPS.year - 1970;
+  tm.Month = GPS.month;
+  tm.Day = GPS.day;
+  tm.Hour = GPS.hour;
+  tm.Minute = GPS.minute;
+  tm.Second = GPS.seconds;
+  udate = makeTime(tm);
+  lat = GPS.latitude/100.;
+  lon = GPS.longitude/100.;
   char datetime[42];
   sprintf(datetime, "20%02d-%02d-%02dT%02d:%02d:%02d,%d,%d,%f,%f", GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, GPS.fix, GPS.fixquality, GPS.latitude/100., GPS.longitude/100.);
-  char datetime_LoRa[26];
-  sprintf(datetime_LoRa, "20%02d-%02d-%02dT%02d:%02d:%02d,%d,%d", GPS.year, GPS.month, GPS.day, GPS.hour, GPS.minute, GPS.seconds, GPS.fix, GPS.fixquality);
-  datepos_LoRa = datetime_LoRa;
   return datetime;
 }
 
@@ -326,7 +390,13 @@ String parseIAQ() {
   output += "," + String(iaqSensor.gasResistance);
   output += "," + String(iaqSensor.temperature);
   output += "," + String(iaqSensor.humidity);
-  output += "," + String(iaqSensor.gasPercentage);
+  output += "," + String(iaqSensor.gasPercentage,6);
+  iaq_ = iaqSensor.iaq;
+  eco2 = iaqSensor.co2Equivalent;
+  bvoc = iaqSensor.breathVocEquivalent;
+  pressure = iaqSensor.pressure;
+  temp = iaqSensor.temperature;
+  humidity = iaqSensor.humidity;
   return output;
 }
 
@@ -337,7 +407,9 @@ String parseIAQ() {
  * @return A comma separated string with all the values read from gas sensor
  */
 String parseDust() {
-PmResult pm = sds.queryPm();
+  PmResult pm = sds.queryPm();
+  pm25 = pm.pm25;
+  pm10 = pm.pm10;
   return String(pm.pm25) + "," + String(pm.pm10);
 }
 
@@ -420,7 +492,13 @@ void writeDataToSD() {
     dataFile.print(",");
     dataFile.print(dust);
     dataFile.print(",");
-    dataFile.println(brightness);
+    dataFile.print(String(bright));
+    dataFile.print(",");
+    dataFile.print(String(wSpeed));
+    dataFile.print(",");
+    dataFile.print(String(wDirection));
+    dataFile.print(",");
+    dataFile.println(String(wRain,4));
     dataFile.close();
     count++;
     SDOn = currentCard == chipSelect1 ? 1 : 2;
@@ -468,20 +546,110 @@ bool initSD() {
 
 /**
  * send data over LoRa, uses global variables to send
+ * we send as floats rather than text to save bandwidth
  */
 void sendData() {
+  // first we convert the numbers to bytes
+  // we are sending 4 byte values (float and unsigned long)
+  byte bCount[4];
+  ulongToBytes(count, bCount);
+  byte bDate[4];
+  ulongToBytes(udate, bDate);
+  byte bLat[4];
+  floatToBytes(lat, bLat);
+  byte bLon[4];
+  floatToBytes(lon, bLon);
+  byte bIaq[4];
+  floatToBytes(iaq_, bIaq);
+  byte bEco2[4];
+  floatToBytes(eco2, bEco2);
+  byte bBvoc[4];
+  floatToBytes(bvoc, bBvoc);
+  byte bPressure[4];
+  floatToBytes(pressure, bPressure);
+  byte bTemp[4];
+  floatToBytes(temp, bTemp);
+  byte bHumidity[4];
+  floatToBytes(humidity, bHumidity);
+  byte bPm25[4];
+  floatToBytes(pm25, bPm25);
+  byte bPm10[4];
+  floatToBytes(pm10, bPm10);
+  byte bBright[4];
+  floatToBytes(bright, bBright);
+  byte bWSpeed[4];
+  floatToBytes(wSpeed, bWSpeed);
+  byte bWDirection[4];
+  floatToBytes(wDirection, bWDirection);
+  byte bRain[4];
+  floatToBytes(wRain, bRain);
+
+
   // send packet
   LoRa.beginPacket();
-  LoRa.print(count);
-  LoRa.print(",");
-  LoRa.print(datepos_LoRa);
-  LoRa.print(",");
-  LoRa.print(iaq);
-  LoRa.print(",");
-  LoRa.print(dust);
-  LoRa.print(",");
-  LoRa.print(brightness);
-  LoRa.print(",");
-  LoRa.print(SDOn);
+  LoRa.write(bDate, 4);
+  LoRa.write(bCount, 4);
+  LoRa.write(bLat, 4);
+  LoRa.write(bLon, 4);
+  LoRa.write(bIaq, 4);
+  LoRa.write(bEco2, 4);
+  LoRa.write(bBvoc, 4);
+  LoRa.write(bPressure, 4);
+  LoRa.write(bTemp, 4);
+  LoRa.write(bHumidity, 4);
+  LoRa.write(bPm25, 4);
+  LoRa.write(bPm10, 4);
+  LoRa.write(bBright, 4);
+  LoRa.write(bWSpeed, 4);
+  LoRa.write(bWDirection, 4);
+  LoRa.write(bRain, 4);
+  LoRa.write(SDOn);       // this is already saved as byte
   LoRa.endPacket();
+}
+
+
+/**
+ * converts float number to byte array
+ */
+void floatToBytes(float value, byte* byteArray) {
+  memcpy(byteArray, &value, 4); // Copy the float value into the byte array
+}
+
+
+/**
+ * converts unseigned int to byte array
+ */
+void ulongToBytes(unsigned long value, byte* byteArray) {
+  memcpy(byteArray, &value, 4); // Copy the value into the byte array
+}
+
+
+/**
+ * converts unseigned int to byte array
+ */
+void longToBytes(long value, byte* byteArray) {
+  memcpy(byteArray, &value, 4); // Copy the value into the byte array
+}
+
+/**
+ * converts a java timestamp string to a unix timestamp
+ */
+unsigned long timeToSeconds() {
+
+}
+
+
+/**
+ * interrupt service routine for anemometer
+ */
+void wind() {
+  windCount++;
+}
+
+
+/**
+ * interrupt service routine for rain gauge
+ */
+void rain() {
+  rainCount++;
 }
