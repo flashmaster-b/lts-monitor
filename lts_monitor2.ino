@@ -1,12 +1,17 @@
 /**
  * Long Term Environmental Monitoring for 
  * artistic projekt "Time out of Present"
+ * for sculpture "The Story of Landscapes is Both Easy and Hard to Tell"
  *
  * Reads environmental data and saves to SD card.
  * 
+ * If it doesn't work you have to specify the precompiled library path for the bsec library
+ * in the platform.txt file under ~/.arduino15/packages/arduino/hardware/samd/[version]/platform.txt
+ * like so: compiler.libraries.ldflags="-L{build.path}/libraries/BSEC_Software_Library/src/algo/bin/cortex-m0plus" -lalgobsec
+ * 
  *
  * @author Jürgen Buchinger
- * @version 4.1 19 Sep 2024
+ * @version 4.2 1 May 2025
  * 
  */
 
@@ -14,15 +19,17 @@
 #include "wiring_private.h" // required for SERCOM UART port
 #include <Adafruit_GPS.h>  
 #include "bsec.h"           // BME680 gas sensor
-#include "SdsDustSensor.h"
+#include "SdsDustSensor.h" // "Nova Fitness SDS dust sensors arduino library" by Pawel Kolodziejczyk 
 #include <SPI.h>
 #include <SD.h>
-#include <LoRa.h>
+#include <LoRa.h>       // "LoRa" by Sandeep Mistry
 #include <TimeLib.h>
 
 
 /**
  * we use two card slots so we can swap on the fly
+ * chipSelect = pin number
+ * the other two are flags
  */
 const int chipSelect1 = 6;
 const int chipSelect2 = 7;
@@ -32,6 +39,7 @@ byte SDOn = 0;
 
 /** 
  * LEDs will show which card is currently being written to
+ * Pin numbers
  */
 #define LED_C1  5
 #define LED_C2  4
@@ -42,10 +50,9 @@ byte SDOn = 0;
  * the pins for the raincounter and 
  * windspeed, will be used as interrupts
  */
-#define LIGHT_SENSOR_PIN  A6
-#define WINDSPEED_PIN     0
-#define RAINWATER_PIN     1
-#define WINDDIRECTION_PIN A5
+#define LIGHT_SENSOR_1_PIN  A6
+#define LIGHT_SENSOR_2_PIN  A5
+#define LIGHT_SENSOR_3_PIN  A4
 
 
 /**
@@ -84,13 +91,10 @@ String datepos = "datetime,fix,fixquality,lat,lon";
 String datepos_LoRa ="datetime,fix,fixquality";
 String iaq = "IAQ,IAQaccuracy,StaticIAQ,CO2equivalent,bVOCequivalent,pressure,gasOhm,temp,humidity,gasPercentage";
 String dust = "PM25,PM10";
-String brightness = "brightness";
-String windspeed = "windspeed";
-String winddirection ="wind direction";
-String rainfall = "rainfall";
-const String header = "num,"+datepos+","+iaq+","+dust+","+brightness+","+windspeed+","+winddirection+","+rainfall;   // header will be inserted on top of each file and will not change
+String brightness = "brightness1,brightness2,brightness3";
+const String header = "num,"+datepos+","+iaq+","+dust+","+brightness+",SD";   // header will be inserted on top of each file and will not change
 time_t udate;
-float lat=0, lon=0, iaq_=0, eco2=0, bvoc=0, pressure=0, temp=0, humidity=0, pm25=0, pm10=0, bright=0, wSpeed=0, wDirection=0, wRain=0;
+float lat=0, lon=0, iaq_=0, eco2=0, bvoc=0, pressure=0, temp=0, humidity=0, pm25=0, pm10=0, bright1=0, bright2=0, bright3=0;
 
 
 /** for keeping track of time, all in ms */
@@ -103,13 +107,8 @@ int page = 0;     // we have to split LoRa data in pages, otherwise its too long
 
 
 /** for average calculation and other calculations */
-float accBrightness = 0;
-int numBrightness = 0;
-volatile int windCount=0, rainCount=0;
-
-// this is for the calculation of the wind vane direction from the value of the voltage divider,
-// we get these values from the datasheet
-const int vaneValues[16] = { 786, 406, 461, 84, 93, 66, 185, 127, 287, 245, 630, 599, 945, 828, 887, 703 };
+float accBrightness1 = 0, accBrightness2 = 0, accBrightness3 = 0;
+int numBrightness1 = 0, numBrightness2 = 0, numBrightness3 = 0;
 
 
 void setup() {
@@ -117,38 +116,32 @@ void setup() {
   delay(3000);
   if(Serial) {
     verbose = true;
-    Serial.println("TIME OUT OF PRESENT v3.1");
+    Serial.println("TIME OUT OF PRESENT v4.2");
     Serial.println("Long term environmental monitoring"); 
   }
 
   pinMode(LED_C1, OUTPUT);
   pinMode(LED_C2, OUTPUT);
-  
-  // attach the wind and rainwater pins to interruts on falling flank
-  pinMode(WINDSPEED_PIN, INPUT_PULLUP);
-  pinMode(RAINWATER_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(WINDSPEED_PIN), wind, FALLING);
-  attachInterrupt(digitalPinToInterrupt(RAINWATER_PIN), rain, FALLING);
 
-  analogWrite(LED_C1, 2);
-  analogWrite(LED_C2, 0);
+  digitalWrite(LED_C1, HIGH);
+  digitalWrite(LED_C2, LOW);
   delay(300);
-  analogWrite(LED_C1, 0);
-  analogWrite(LED_C2, 2);
+  digitalWrite(LED_C1, LOW);
+  digitalWrite(LED_C2, HIGH);
   delay(300);
-  analogWrite(LED_C1, 2);
-  analogWrite(LED_C2, 0);
+  digitalWrite(LED_C1, HIGH);
+  digitalWrite(LED_C2, LOW);
   delay(300);
-  analogWrite(LED_C1, 0);
-  analogWrite(LED_C2, 2);
+  digitalWrite(LED_C1, LOW);
+  digitalWrite(LED_C2, HIGH);
   delay(300);
-  analogWrite(LED_C1, 2);
-  analogWrite(LED_C2, 0);
+  digitalWrite(LED_C1, HIGH);
+  digitalWrite(LED_C2, LOW);
   delay(300);
-  analogWrite(LED_C1, 0);
+  digitalWrite(LED_C1, LOW);
   delay(300);
-  analogWrite(LED_C1, 2);
-  analogWrite(LED_C2, 2);
+  digitalWrite(LED_C1, HIGH);
+  digitalWrite(LED_C2, HIGH);
 
 
   /**
@@ -229,8 +222,8 @@ void setup() {
   timepassed = millis();
   lastDustOff = millis();
   lastDustOn = millis();
-  analogWrite(LED_C1, 0);
-  analogWrite(LED_C2, 0);
+  digitalWrite(LED_C1, LOW);
+  digitalWrite(LED_C2, LOW);
 }
 
 
@@ -239,8 +232,12 @@ void loop() {
    * Light sensor reading
    * Data: brightness
    */
-  accBrightness += analogRead(LIGHT_SENSOR_PIN);
-  numBrightness++;
+  accBrightness1 += analogRead(LIGHT_SENSOR_1_PIN);
+  numBrightness1++;  
+  accBrightness2 += analogRead(LIGHT_SENSOR_2_PIN);
+  numBrightness2++;
+  accBrightness3 += analogRead(LIGHT_SENSOR_3_PIN);
+  numBrightness3++;
 
   /**
    * GPS reading
@@ -301,35 +298,16 @@ void loop() {
     digitalWrite(LED_BUILTIN, LOW);
 
     // calculate average of brightness
-    bright = accBrightness/numBrightness;
-    accBrightness=0;
-    numBrightness=0;
- 
-    // read the value from the vind vane voltage divider and
-    // calculate the direction in degrees
-    int dir = analogRead(WINDDIRECTION_PIN);
-    int smallestDifference = abs(dir - vaneValues[0]);
-    wDirection = 0;
-    for (int i = 1; i < 16; i++) {
-        int difference = abs(dir - vaneValues[i]);
-        if (difference < smallestDifference) {
-            smallestDifference = difference;
-            wDirection = i * 22.5;
-        }
-    }
-
-    // calculate windspeed. As per datasheet, a wind speed of 2.4km/h causes 
-    // the switch to close once per second, so v [km/h] = count / sec * 2.4
-    // somehow the contact closes twice for each rotation so we divide by two
-    wSpeed = (windCount / (cycletime/1000.0)) * 2.4 / 2;
-    windCount = 0;
-
-    // calculate rainfall amount, according to datasheet, 1 contact equals
-    // 0.2794 mm of rainfall
-    // also here the contact closes twice, so / 2 it is
-    wRain = rainCount * 0.2794 / 2;
-    rainCount = 0;
-
+    bright1 = accBrightness1/numBrightness1;
+    bright2 = accBrightness2/numBrightness2;
+    bright3 = accBrightness3/numBrightness3;
+    accBrightness1=0;
+    numBrightness1=0;
+    accBrightness2=0;
+    numBrightness2=0;
+    accBrightness3=0;
+    numBrightness3=0;
+    
     writeDataToSD();
     sendData();
     if(verbose) {
@@ -341,13 +319,11 @@ void loop() {
       Serial.print(",");
       Serial.print(dust);
       Serial.print(",");
-      Serial.print(bright);
+      Serial.print(bright1);
       Serial.print(",");
-      Serial.print(String(wSpeed));
+      Serial.print(bright2);
       Serial.print(",");
-      Serial.print(String(wDirection));
-      Serial.print(",");
-      Serial.print(String(wRain));
+      Serial.print(bright3);
       Serial.print(",");
       Serial.println(SDOn);
     }
@@ -468,7 +444,12 @@ void onError(int level, String err) {
 void writeDataToSD() {
   // we are setting this high during writing to ensure noone removes disk while writing to it
   int led = currentCard == chipSelect1 ? LED_C1 : LED_C2;
-  analogWrite(led, 2);
+  digitalWrite(led, HIGH);
+
+  // we are setting the not used chip select to HIGH to deselect it (I don't know why this is not done automatically)
+  int inactiveCard = currentCard == chipSelect1 ? chipSelect2 : chipSelect1;
+  digitalWrite(inactiveCard, HIGH);
+  digitalWrite(currentCard, LOW);
 
   char filename[14];
   sprintf(filename, "20%02d%02d%02d.txt", GPS.year, GPS.month, GPS.day);
@@ -492,19 +473,20 @@ void writeDataToSD() {
     dataFile.print(",");
     dataFile.print(dust);
     dataFile.print(",");
-    dataFile.print(String(bright));
+    dataFile.print(String(bright1));
     dataFile.print(",");
-    dataFile.print(String(wSpeed));
+    dataFile.print(String(bright2));
     dataFile.print(",");
-    dataFile.print(String(wDirection));
+    dataFile.print(String(bright3));
     dataFile.print(",");
-    dataFile.println(String(wRain,4));
+    dataFile.println(String(SDOn));
     dataFile.close();
     count++;
     SDOn = currentCard == chipSelect1 ? 1 : 2;
-    analogWrite(led, 0);
-  } else {                  // if not, produce error
-    analogWrite(led, 64);   // bright light on the respective SD card slot = error
+    digitalWrite(led, LOW);
+  } else {                // if not, produce error
+    digitalWrite(led, HIGH);   // long light on the respective SD card slot = error
+    delay(100);
     onError(3, "Error opening file: '"+String(filename)+"'");
     onError(2, "Trying to re-initialize...");
     currentCard = currentCard == chipSelect1 ? chipSelect2 : chipSelect1; // change card slots
@@ -513,7 +495,7 @@ void writeDataToSD() {
     // and if it succeeds, we try to write again
     if(initSD()) {
       writeDataToSD();
-      analogWrite(led, 0);  // reset error led because all is good now
+      digitalWrite(led, LOW);  // reset error led because all is good now
     } else {
       onError(3, "Initialization of other SD failed!");
     }
@@ -529,17 +511,22 @@ void writeDataToSD() {
 bool initSD() {
   // turn the not active card led off no matter whether its working or not
   int led = currentCard == chipSelect1 ? LED_C2 : LED_C1;
-  analogWrite(led, 0);
+  digitalWrite(led, LOW);
   // turn the active card led on
   led = currentCard == chipSelect1 ? LED_C1 : LED_C2;
-  analogWrite(led, 64);
+  digitalWrite(led, HIGH);
+  // we are setting the not used chip select to HIGH to deselect it (I don't know why this is not done automatically)
+  int inactiveCard = currentCard == chipSelect1 ? chipSelect2 : chipSelect1;
+  digitalWrite(inactiveCard, HIGH);
+  digitalWrite(currentCard, LOW);
   onError(0, "Initializing SD card...");
+  onError(0, String(currentCard));
   if(!SD.begin(currentCard)) {
     onError(3, "SD initialization failed.");
     return false;
   }
   onError(0, "initialization done.");
-  analogWrite(led, 0);
+  digitalWrite(led, LOW);
   return true;
 }
 
@@ -575,14 +562,17 @@ void sendData() {
   floatToBytes(pm25, bPm25);
   byte bPm10[4];
   floatToBytes(pm10, bPm10);
-  byte bBright[4];
-  floatToBytes(bright, bBright);
-  byte bWSpeed[4];
-  floatToBytes(wSpeed, bWSpeed);
+  byte bBright1[4];
+  floatToBytes(bright1, bBright1);
+  byte bBright2[4];
+  floatToBytes(bright2, bBright2);
+  byte bBright3[4];
+  floatToBytes(bright3, bBright3);
+  // we leave these two in although we dont measure them to ensure backwards compatibility with the receiver
   byte bWDirection[4];
-  floatToBytes(wDirection, bWDirection);
+  floatToBytes(0, bWDirection);
   byte bRain[4];
-  floatToBytes(wRain, bRain);
+  floatToBytes(0, bRain);
 
 
   // send packet
@@ -599,8 +589,9 @@ void sendData() {
   LoRa.write(bHumidity, 4);
   LoRa.write(bPm25, 4);
   LoRa.write(bPm10, 4);
-  LoRa.write(bBright, 4);
-  LoRa.write(bWSpeed, 4);
+  LoRa.write(bBright1, 4);
+  LoRa.write(bBright2, 4);
+  LoRa.write(bBright3, 4);
   LoRa.write(bWDirection, 4);
   LoRa.write(bRain, 4);
   LoRa.write(SDOn);       // this is already saved as byte
@@ -629,27 +620,4 @@ void ulongToBytes(unsigned long value, byte* byteArray) {
  */
 void longToBytes(long value, byte* byteArray) {
   memcpy(byteArray, &value, 4); // Copy the value into the byte array
-}
-
-/**
- * converts a java timestamp string to a unix timestamp
- */
-unsigned long timeToSeconds() {
-
-}
-
-
-/**
- * interrupt service routine for anemometer
- */
-void wind() {
-  windCount++;
-}
-
-
-/**
- * interrupt service routine for rain gauge
- */
-void rain() {
-  rainCount++;
 }
