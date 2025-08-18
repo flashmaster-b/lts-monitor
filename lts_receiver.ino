@@ -1,6 +1,7 @@
 /**
  * Long Term Environmental Monitoring for 
- * artistic projekt "Time out of Present"
+ * artistic project "Time out of Present"
+ * "The Story of Landscapes is Both Easy and Hard to Tell" branch
  *
  * receives and displays data from lts-monitor2
  * message is a stream of bytes and contains the following values
